@@ -27,6 +27,11 @@ export interface SapNotePreconditionsParams {
   version?: string;
 }
 
+export interface SapNoteAttachmentsParams {
+  id: string;
+  lang?: 'EN' | 'DE';
+}
+
 // SAP Note data structures (from SAP Notes API)
 export interface SapNote {
   id: string;
@@ -127,6 +132,16 @@ export const SAP_NOTE_PRECONDITIONS_SCHEMA = {
     lang: { type: 'string', enum: ['EN', 'DE'], default: 'EN' },
     softwareComponent: { type: 'string', description: 'Software Component to filter by (e.g. S4CORE)' },
     version: { type: 'string', description: 'Version to filter by (e.g. 108)' }
+  },
+  required: ['id'],
+  additionalProperties: false
+} as const;
+
+export const SAP_NOTE_ATTACHMENTS_SCHEMA = {
+  type: 'object',
+  properties: {
+    id: { type: 'string', description: 'SAP Note ID', pattern: '^[0-9]{6,8}$' },
+    lang: { type: 'string', enum: ['EN', 'DE'], default: 'EN' }
   },
   required: ['id'],
   additionalProperties: false

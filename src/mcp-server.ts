@@ -5,9 +5,10 @@ import type {
   SapNoteSearchParams,
   SapNoteGetParams,
   SapNotePreconditionsParams,
+  SapNoteAttachmentsParams,
   ServerConfig
 } from './types.js';
-import { SAP_NOTE_SEARCH_SCHEMA, SAP_NOTE_GET_SCHEMA, SAP_NOTE_PRECONDITIONS_SCHEMA } from './types.js';
+import { SAP_NOTE_SEARCH_SCHEMA, SAP_NOTE_GET_SCHEMA, SAP_NOTE_PRECONDITIONS_SCHEMA, SAP_NOTE_ATTACHMENTS_SCHEMA } from './types.js';
 import { SapAuthenticator } from './auth.js';
 import { SapNotesApiClient } from './sap-notes-api.js';
 import { logger } from './logger.js';
@@ -25,6 +26,7 @@ const ajv = new Ajv({ allErrors: true });
 const validateSearchParams = ajv.compile(SAP_NOTE_SEARCH_SCHEMA);
 const validateGetParams = ajv.compile(SAP_NOTE_GET_SCHEMA);
 const validatePreconditionsParams = ajv.compile(SAP_NOTE_PRECONDITIONS_SCHEMA);
+const validateAttachmentsParams = ajv.compile(SAP_NOTE_ATTACHMENTS_SCHEMA);
 
 interface JsonRpcRequest {
   jsonrpc: '2.0';
@@ -242,6 +244,11 @@ class SapNoteMcpServer {
             name: 'sap_note_preconditions',
             description: 'Get prerequisites for a specific SAP Note with optional filtering by software component and version.',
             inputSchema: SAP_NOTE_PRECONDITIONS_SCHEMA
+          },
+          {
+            name: 'sap_note_attachments',
+            description: 'Get attachments for a specific SAP Note.',
+            inputSchema: SAP_NOTE_ATTACHMENTS_SCHEMA
           }
         ]
       }
@@ -296,6 +303,9 @@ class SapNoteMcpServer {
           break;
         case 'sap_note_preconditions':
           result = await this.handleSapNotePreconditions(toolArgs, token);
+          break;
+        case 'sap_note_attachments':
+          result = await this.handleSapNoteAttachments(toolArgs, token);
           break;
         default:
           this.sendError(message.id, -32601, `Unknown tool: ${toolName}`);
@@ -406,6 +416,53 @@ class SapNoteMcpServer {
           resultText += ` - ${prereq.title}`;
         }
         resultText += `\n`;
+      }
+    }
+
+    return {
+      content: [{
+        type: 'text',
+        text: resultText
+      }],
+      isError: false
+    };
+  }
+
+  /**
+   * Handle SAP Note attachments
+   */
+  private async handleSapNoteAttachments(args: any, token: string): Promise<any> {
+    // Validate input parameters
+    if (!validateAttachmentsParams(args)) {
+      throw new Error(`Invalid attachments parameters: ${JSON.stringify(validateAttachmentsParams.errors)}`);
+    }
+
+    const attachmentsParams = args as SapNoteAttachmentsParams;
+    const noteDetail = await this.sapNotesClient.getNote(attachmentsParams.id, token);
+
+    if (!noteDetail) {
+      return {
+        content: [{
+          type: 'text',
+          text: `SAP Note ${attachmentsParams.id} not found or not accessible.`
+        }],
+        isError: true
+      };
+    }
+
+    // Format attachments for MCP
+    let resultText = `**Attachments for SAP Note ${noteDetail.id}**\n\n`;
+
+    if (!noteDetail.attachments || noteDetail.attachments.length === 0) {
+      resultText += `No attachments found for this SAP Note.\n`;
+    } else {
+      resultText += `**Found ${noteDetail.attachments.length} attachment(s):**\n\n`;
+
+      for (const attachment of noteDetail.attachments) {
+        resultText += `• **${attachment.name}**\n`;
+        if (attachment.type) resultText += `  Type: ${attachment.type.toUpperCase()}\n`;
+        if (attachment.size) resultText += `  Size: ${attachment.size}\n`;
+        resultText += `  URL: ${attachment.url}\n\n`;
       }
     }
 
