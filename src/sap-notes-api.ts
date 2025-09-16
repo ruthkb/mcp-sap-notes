@@ -1,6 +1,7 @@
 import type { ServerConfig, SapNotePrecondition } from './types.js';
 import { logger } from './logger.js';
 import { chromium, type Browser, type Page } from 'playwright';
+import axios, { type AxiosRequestConfig } from 'axios';
 
 export interface SapNoteResult {
   id: string;
@@ -168,17 +169,20 @@ export class SapNotesApiClient {
     logger.info(`📄 Fetching SAP Note: ${noteId}`);
 
     try {
-      // Try Playwright-based raw notes API first (most likely to get actual content)
+      // Use Playwright headless approach (optimized for performance)
       try {
-        logger.info(`🎭 Trying Playwright approach for note ${noteId}`);
+        logger.info(`🎭 Fetching note ${noteId} with optimized Playwright`);
         const note = await this.getNoteWithPlaywright(noteId, token);
         if (note) {
           console.log(`✅ Retrieved SAP Note ${noteId} via Playwright`);
           return note;
+        } else {
+          logger.warn(`⚠️ Playwright approach returned null for note ${noteId}`);
         }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        logger.warn(`⚠️ Playwright approach failed: ${errorMessage}, trying HTTP fallbacks`);
+        logger.error(`❌ Playwright approach failed: ${errorMessage}`);
+        throw error;
       }
 
       // Try the raw notes API with HTTP (might get redirects)
@@ -669,19 +673,47 @@ export class SapNotesApiClient {
     try {
       logger.debug(`🎭 Launching browser for note ${noteId}`);
       
-      // Launch browser
+      // Launch browser with optimized settings for performance
       browser = await chromium.launch({
-        headless: !this.config.headful,
-        args: ['--disable-dev-shm-usage', '--no-sandbox']
+        headless: true, // Always headless for better performance
+        args: [
+          '--disable-dev-shm-usage',
+          '--no-sandbox',
+          '--disable-gpu',
+          '--disable-web-security',
+          '--disable-features=VizDisplayCompositor',
+          '--disable-extensions',
+          '--disable-plugins',
+          '--disable-images', // Don't load images for faster loading
+          '--disable-javascript-harmony-shipping',
+          '--disable-background-timer-throttling',
+          '--disable-backgrounding-occluded-windows',
+          '--disable-renderer-backgrounding',
+          '--disable-field-trial-config',
+          '--disable-ipc-flooding-protection',
+          '--memory-pressure-off',
+          '--max_old_space_size=4096'
+        ]
       });
 
-      // Create context and add cookies
+      // Create context with optimized settings
       const context = await browser.newContext({
-        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        viewport: { width: 1280, height: 720 }, // Smaller viewport for faster rendering
+        deviceScaleFactor: 1,
+        isMobile: false,
+        hasTouch: false,
+        locale: 'en-US',
+        timezoneId: 'America/New_York',
+        // Disable unnecessary features for better performance
+        javaScriptEnabled: true,
+        bypassCSP: true,
+        ignoreHTTPSErrors: true
       });
 
       // Get cookies from the cached authentication
       const cookies = await this.getCachedCookies();
+
       if (cookies.length > 0) {
         await context.addCookies(cookies);
         logger.debug(`🍪 Added ${cookies.length} cached cookies to browser context`);
@@ -697,20 +729,21 @@ export class SapNotesApiClient {
       page = await context.newPage();
 
       // Navigate to the raw notes endpoint
-      const rawUrl = `https://me.sap.com/backend/raw/sapnotes/Detail?q=${noteId}&t=E&isVTEnabled=false`;
+      // const rawUrl = `https://me.sap.com/backend/raw/sapnotes/Detail?q=${noteId}&t=E&isVTEnabled=false`;
+      const rawUrl = `http://localhost:8000`;
       logger.debug(`🌐 Navigating to: ${rawUrl}`);
 
       const response = await page.goto(rawUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000
+        waitUntil: 'networkidle', // Wait for network to be idle for better reliability
+        timeout: 15000 // Reduced timeout for faster failure
       });
 
       if (!response || !response.ok()) {
         throw new Error(`HTTP ${response?.status()}: Failed to load page`);
       }
 
-      // Wait a bit for any JavaScript to execute
-      await page.waitForTimeout(2000);
+      // Wait a bit for any JavaScript to execute (reduced time for better performance)
+      await page.waitForTimeout(1000);
 
       // Get page content and check what we received
       const content = await page.content();
@@ -928,6 +961,7 @@ export class SapNotesApiClient {
     }
   }
 
+
   /**
    * Parse cookies from token string
    */
@@ -1016,135 +1050,8 @@ export class SapNotesApiClient {
    * Extract prerequisites from SAP Note Preconditions section
    */
   private extractPrerequisites(sapNoteData: any): any[] {
-
-    // Handle cases where only content string is passed (fallback mode)
-    // if (typeof sapNoteData === 'string') {
-    //   return this.extractPrerequisitesFromContent(sapNoteData);
-    // }
-    const prerequisites = sapNoteData.Preconditions.Items;
+    const prerequisites = sapNoteData?.Preconditions?.Items;
     return prerequisites;
-
-    // try {
-    //   // First, try to extract from Preconditions structure (technical prerequisites by software component)
-    //   if (sapNoteData.Preconditions && sapNoteData.Preconditions.Items && Array.isArray(sapNoteData.Preconditions.Items)) {
-    //     console.log(`sapNoteData.Preconditions.Items: ${JSON.stringify(sapNoteData.Preconditions.Items, null, 2)}`);
-    //     for (const item of sapNoteData.Preconditions.Items) {
-    //       const prerequisite = {
-    //         note: item.Number?.trim(),
-    //         title: item.Title,
-    //         component: item.SoftwareComponent,
-    //         validFrom: item.ValidFrom,
-    //         validTo: item.ValidTo,
-    //         sapComponent: item.Component
-    //       };
-
-    //       if (prerequisite.note) {
-    //         let prereqText = `SAP Note ${prerequisite.note}`;
-    //         if (prerequisite.component) {
-    //           prereqText += ` (${prerequisite.component}`;
-    //           if (prerequisite.validFrom && prerequisite.validTo) {
-    //             prereqText += ` ${prerequisite.validFrom}-${prerequisite.validTo}`;
-    //           }
-    //           prereqText += ')';
-    //         }
-    //         if (prerequisite.title) {
-    //           prereqText += ` - ${prerequisite.title}`;
-    //         }
-    //         prerequisites.push(prereqText);
-    //       }
-    //     }
-    //   }
-
-      // // Fallback: Extract from content text if no Preconditions structure
-      // if (prerequisites.length === 0 && sapNoteData.LongText?.value) {
-      //   const content = sapNoteData.LongText.value;
-      //   const cleanText = content.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-
-      //   // Look for SAP Note references in prerequisites section
-      //   const notePattern = /(?:SAP )?Note\s+(\d{6,8})/gi;
-      //   const matches = cleanText.match(notePattern);
-
-      //   if (matches) {
-      //     const uniquePrereqNotes = [...new Set(matches.map((match: string) => {
-      //       const noteId = match.match(/(\d{6,8})/);
-      //       return noteId ? noteId[1] : null;
-      //     }).filter(Boolean))] as string[];
-
-      //     prerequisites.push(...uniquePrereqNotes.map((noteId: string) => `SAP Note ${noteId}`));
-      //   }
-
-      //   // Look for system prerequisites
-      //   const systemPrerequisites = cleanText.match(/This SAP Note is relevant only for ([^.]+)/gi);
-      //   if (systemPrerequisites) {
-      //     prerequisites.push(...systemPrerequisites.map((match: string) =>
-      //       match.replace(/^This SAP Note is relevant only for /i, 'Required for: ').trim()
-      //     ));
-      //   }
-      // }
-
-    //   if (prerequisites.length > 0) {
-    //     logger.debug(`📋 Found ${prerequisites.length} prerequisites`);
-    //   }
-    // } catch (error) {
-    //   logger.warn(`⚠️ Failed to extract prerequisites: ${error}`);
-    // }
-
-    // // Remove duplicates and return
-    // return [...new Set(prerequisites)];
-  }
-
-
-  /**
-   * Extract prerequisites from text content (fallback method)
-   */
-  private extractPrerequisitesFromContent(content: string): SapNotePrecondition[] {
-    const prerequisites: SapNotePrecondition[] = [];
-
-    try {
-      if (!content) return prerequisites;
-
-      const cleanText = content.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-
-      // Look for SAP Note references in prerequisites section
-      const notePattern = /(?:SAP )?Note\s+(\d{6,8})/gi;
-      const matches = cleanText.match(notePattern);
-
-      if (matches) {
-        const uniquePrereqNotes = [...new Set(matches.map((match: string) => {
-          const noteId = match.match(/(\d{6,8})/);
-          return noteId ? noteId[1] : null;
-        }).filter(Boolean))] as string[];
-
-        prerequisites.push(...uniquePrereqNotes.map((noteId: string) => ({
-          noteId: noteId,
-          title: '',
-          component: 'N/A',
-          validFrom: 'N/A',
-          validTo: 'N/A'
-        })));
-      }
-
-      // Look for system prerequisites
-      const systemPrerequisites = cleanText.match(/This SAP Note is relevant only for ([^.]+)/gi);
-      if (systemPrerequisites) {
-        prerequisites.push(...systemPrerequisites.map((match: string) => ({
-          noteId: 'SYSTEM',
-          title: match.replace(/^This SAP Note is relevant only for /i, '').trim(),
-          component: 'N/A',
-          validFrom: 'N/A',
-          validTo: 'N/A'
-        })));
-      }
-
-      logger.debug(`📋 Found ${prerequisites.length} prerequisites from content`);
-    } catch (error) {
-      logger.warn(`⚠️ Failed to extract prerequisites from content: ${error}`);
-    }
-
-    // Remove duplicates and return
-    return prerequisites.filter((prereq, index, self) => 
-      index === self.findIndex(p => p.noteId === prereq.noteId)
-    );
   }
 
 
