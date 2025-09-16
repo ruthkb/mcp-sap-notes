@@ -1,12 +1,13 @@
 import { config } from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join, isAbsolute } from 'path';
-import type { 
-  SapNoteSearchParams, 
+import type {
+  SapNoteSearchParams,
   SapNoteGetParams,
-  ServerConfig 
+  SapNotePreconditionsParams,
+  ServerConfig
 } from './types.js';
-import { SAP_NOTE_SEARCH_SCHEMA, SAP_NOTE_GET_SCHEMA } from './types.js';
+import { SAP_NOTE_SEARCH_SCHEMA, SAP_NOTE_GET_SCHEMA, SAP_NOTE_PRECONDITIONS_SCHEMA } from './types.js';
 import { SapAuthenticator } from './auth.js';
 import { SapNotesApiClient } from './sap-notes-api.js';
 import { logger } from './logger.js';
@@ -23,6 +24,7 @@ config({ path: join(__dirname, '..', '.env') });
 const ajv = new Ajv({ allErrors: true });
 const validateSearchParams = ajv.compile(SAP_NOTE_SEARCH_SCHEMA);
 const validateGetParams = ajv.compile(SAP_NOTE_GET_SCHEMA);
+const validatePreconditionsParams = ajv.compile(SAP_NOTE_PRECONDITIONS_SCHEMA);
 
 interface JsonRpcRequest {
   jsonrpc: '2.0';
@@ -235,6 +237,11 @@ class SapNoteMcpServer {
             name: 'sap_note_get',
             description: 'Fetch full metadata & HTML for a single Note.',
             inputSchema: SAP_NOTE_GET_SCHEMA
+          },
+          {
+            name: 'sap_note_preconditions',
+            description: 'Get prerequisites for a specific SAP Note with optional filtering by software component and version.',
+            inputSchema: SAP_NOTE_PRECONDITIONS_SCHEMA
           }
         ]
       }
@@ -286,6 +293,9 @@ class SapNoteMcpServer {
           break;
         case 'sap_note_get':
           result = await this.handleSapNoteGet(toolArgs, token);
+          break;
+        case 'sap_note_preconditions':
+          result = await this.handleSapNotePreconditions(toolArgs, token);
           break;
         default:
           this.sendError(message.id, -32601, `Unknown tool: ${toolName}`);
@@ -341,6 +351,74 @@ class SapNoteMcpServer {
   }
 
   /**
+   * Handle SAP Note preconditions
+   */
+  private async handleSapNotePreconditions(args: any, token: string): Promise<any> {
+    // Validate input parameters
+    if (!validatePreconditionsParams(args)) {
+      throw new Error(`Invalid preconditions parameters: ${JSON.stringify(validatePreconditionsParams.errors)}`);
+    }
+
+    const preconditionsParams = args as SapNotePreconditionsParams;
+
+    // Get prerequisites with optional filtering
+    const preconditions = await this.sapNotesClient.getNotePreconditions(
+      preconditionsParams.id,
+      token,
+      preconditionsParams.softwareComponent,
+      preconditionsParams.version
+    );
+
+    // Format prerequisites for MCP
+    let resultText = `**Prerequisites for SAP Note ${preconditionsParams.id}**\n\n`;
+
+    // Add filter information if provided
+    if (preconditionsParams.softwareComponent || preconditionsParams.version) {
+      resultText += `**Filters Applied:**\n`;
+      if (preconditionsParams.softwareComponent) {
+        resultText += `- Software Component: ${preconditionsParams.softwareComponent}\n`;
+      }
+      if (preconditionsParams.version) {
+        resultText += `- Version: ${preconditionsParams.version}\n`;
+      }
+      resultText += `\n`;
+    }
+
+    if (!preconditions || preconditions.length === 0) {
+      resultText += `No prerequisites found for this SAP Note`;
+      if (preconditionsParams.softwareComponent || preconditionsParams.version) {
+        resultText += ` with the specified filters`;
+      }
+      resultText += `.\n`;
+    } else {
+      resultText += `**Found ${preconditions.length} prerequisite(s):**\n\n`;
+
+      for (const prereq of preconditions) {
+        resultText += `• SAP Note ${prereq.noteId}`;
+        if (prereq.component && prereq.component !== 'N/A') {
+          resultText += ` (${prereq.component}`;
+          if (prereq.validFrom && prereq.validTo && prereq.validFrom !== 'N/A' && prereq.validTo !== 'N/A') {
+            resultText += ` ${prereq.validFrom}-${prereq.validTo}`;
+          }
+          resultText += ')';
+        }
+        if (prereq.title) {
+          resultText += ` - ${prereq.title}`;
+        }
+        resultText += `\n`;
+      }
+    }
+
+    return {
+      content: [{
+        type: 'text',
+        text: resultText
+      }],
+      isError: false
+    };
+  }
+
+  /**
    * Handle SAP Note get
    */
   private async handleSapNoteGet(args: any, token: string): Promise<any> {
@@ -372,6 +450,37 @@ class SapNoteMcpServer {
     resultText += `**Release Date:** ${noteDetail.releaseDate}\n`;
     resultText += `**Language:** ${noteDetail.language}\n`;
     resultText += `**URL:** ${noteDetail.url}\n\n`;
+
+    // Add prerequisites if available
+    if (noteDetail.prerequisites && noteDetail.prerequisites.length > 0) {
+      resultText += `**Prerequisites:**\n`;
+      noteDetail.prerequisites.forEach(prereq => {
+        resultText += `- SAP Note ${prereq}\n`;
+      });
+      resultText += `\n`;
+    }
+
+    // Add attachments if available
+    if (noteDetail.attachments && noteDetail.attachments.length > 0) {
+      resultText += `**Attachments:**\n`;
+      noteDetail.attachments.forEach(attachment => {
+        resultText += `- ${attachment.name}`;
+        if (attachment.type) resultText += ` (${attachment.type.toUpperCase()})`;
+        if (attachment.size) resultText += ` - ${attachment.size}`;
+        resultText += `\n  URL: ${attachment.url}\n`;
+      });
+      resultText += `\n`;
+    }
+
+    // Add related notes if available
+    if (noteDetail.relatedNotes && noteDetail.relatedNotes.length > 0) {
+      resultText += `**Related Notes:**\n`;
+      noteDetail.relatedNotes.forEach(relNote => {
+        resultText += `- SAP Note ${relNote}\n`;
+      });
+      resultText += `\n`;
+    }
+
     resultText += `**Content:**\n${noteDetail.content}\n\n`;
 
     return {
@@ -441,16 +550,33 @@ class SapNoteMcpServer {
 const isDirectRun = (() => {
   try {
     const thisFile = fileURLToPath(import.meta.url);
-    const invoked = process.argv[1] ? join(process.cwd(), process.argv[1]) : '';
-    return thisFile === invoked;
+    const invoked = process.argv[1];
+
+    if (!invoked) return false;
+
+    // More robust path comparison for Windows/Unix
+    const normalizeFilePath = (path: string) => {
+      return path.replace(/\\/g, '/').toLowerCase();
+    };
+
+    const normalizedThisFile = normalizeFilePath(thisFile);
+    const normalizedInvoked = normalizeFilePath(invoked);
+
+    // Check if the invoked file ends with the same path
+    return normalizedThisFile.endsWith(normalizedInvoked) ||
+           normalizedInvoked.endsWith(normalizedThisFile) ||
+           normalizedThisFile.includes('mcp-server.js') && normalizedInvoked.includes('mcp-server.js');
   } catch {
     return false;
   }
 })();
 
-if (isDirectRun) {
+// For debugging on Windows - force start if we detect we're the main module
+const forceStart = process.argv[1] && process.argv[1].includes('mcp-server.js');
+
+if (isDirectRun || forceStart) {
   const server = new SapNoteMcpServer();
-  
+
   server.start().catch((error) => {
     logger.error('Failed to start server:', error);
     process.exit(1);

@@ -20,6 +20,13 @@ export interface SapNoteGetParams {
   lang?: 'EN' | 'DE';
 }
 
+export interface SapNotePreconditionsParams {
+  id: string;
+  lang?: 'EN' | 'DE';
+  softwareComponent?: string;
+  version?: string;
+}
+
 // SAP Note data structures (from SAP Notes API)
 export interface SapNote {
   id: string;
@@ -35,6 +42,15 @@ export interface SapNote {
 
 export interface SapNoteDetail extends SapNote {
   content: string;
+  prerequisites?: SapNotePrecondition[];
+}
+
+export interface SapNotePrecondition {
+  noteId: string;
+  title?: string;
+  component: string;
+  validFrom: string;
+  validTo: string;
 }
 
 // Configuration and environment
@@ -99,6 +115,18 @@ export const SAP_NOTE_GET_SCHEMA = {
   properties: {
     id: { type: 'string', description: 'SAP Note ID', pattern: '^[0-9]{6,8}$' },
     lang: { type: 'string', enum: ['EN', 'DE'], default: 'EN' }
+  },
+  required: ['id'],
+  additionalProperties: false
+} as const;
+
+export const SAP_NOTE_PRECONDITIONS_SCHEMA = {
+  type: 'object',
+  properties: {
+    id: { type: 'string', description: 'SAP Note ID', pattern: '^[0-9]{6,8}$' },
+    lang: { type: 'string', enum: ['EN', 'DE'], default: 'EN' },
+    softwareComponent: { type: 'string', description: 'Software Component to filter by (e.g. S4CORE)' },
+    version: { type: 'string', description: 'Version to filter by (e.g. 108)' }
   },
   required: ['id'],
   additionalProperties: false

@@ -220,8 +220,13 @@ export class SapAuthenticator {
 
       // Launch browser
       logger.warn('🎬 Browser launching...');
-      this.browser = await browserLauncher.launch(launchOptions);
-      logger.warn('✅ Browser launched successfully');
+      try {
+        this.browser = await browserLauncher.launch(launchOptions);
+        logger.warn('✅ Browser launched successfully');
+      } catch (launchError) {
+        logger.error('❌ Browser launch failed:', launchError);
+        throw launchError;
+      }
 
       // Prepare context options
       const contextOptions = {
@@ -233,12 +238,22 @@ export class SapAuthenticator {
 
       logger.warn('🔧 Creating browser context with client certificate...');
       // Create a new context with the client certificate
-      this.context = await this.browser.newContext(contextOptions);
-      logger.warn('✅ Browser context created');
+      try {
+        this.context = await this.browser.newContext(contextOptions);
+        logger.warn('✅ Browser context created');
+      } catch (contextError) {
+        logger.error('❌ Browser context creation failed:', contextError);
+        throw contextError;
+      }
       
       logger.warn('📄 Creating new page...');
-      this.page = await this.context.newPage();
-      logger.warn('✅ Page created');
+      try {
+        this.page = await this.context.newPage();
+        logger.warn('✅ Page created');
+      } catch (pageError) {
+        logger.error('❌ Page creation failed:', pageError);
+        throw pageError;
+      }
 
       // Add event listeners for debugging
       this.page.on('request', request => {
@@ -364,6 +379,7 @@ export class SapAuthenticator {
       logger.error('Authentication failed:', error);
       if (error instanceof Error) {
         logger.error('Error message:', error.message);
+        logger.error('Error stack:', error.stack);
       }
       this.authState = { isAuthenticated: false };
       
@@ -373,7 +389,9 @@ export class SapAuthenticator {
           error instanceof BrowserNotFoundError) {
         throw error;
       } else {
-        throw new AuthenticationError('Authentication process failed', error as Error);
+        // Preserve the original error details
+        const originalMessage = error instanceof Error ? error.message : 'Unknown error';
+        throw new AuthenticationError(`Authentication process failed: ${originalMessage}`, error as Error);
       }
     } finally {
       // Always clean up the browser

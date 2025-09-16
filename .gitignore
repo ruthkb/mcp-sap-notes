@@ -101,3 +101,6 @@ temp/
 .Trashes
 ehthumbs.db
 Thumbs.db 
+
+CLAUDE*.md
+response.json

@@ -1,4 +1,4 @@
-import type { ServerConfig } from './types.js';
+import type { ServerConfig, SapNotePrecondition } from './types.js';
 import { logger } from './logger.js';
 import { chromium, type Browser, type Page } from 'playwright';
 
@@ -29,6 +29,14 @@ export interface SapNoteDetail {
   priority?: string;
   category?: string;
   url: string;
+  prerequisites?: SapNotePrecondition[];
+  attachments?: Array<{
+    name: string;
+    url: string;
+    type?: string;
+    size?: string;
+  }>;
+  relatedNotes?: string[];
 }
 
 /**
@@ -86,6 +94,74 @@ export class SapNotesApiClient {
   }
 
   /**
+   * Get prerequisites for a specific SAP Note with optional filtering
+   */
+  async getNotePreconditions(noteId: string, token: string, softwareComponent?: string, version?: string): Promise<SapNotePrecondition[]> {
+    console.log(`📋 Fetching prerequisites for SAP Note: ${noteId}`);    
+
+    try {
+      // Get the specific note details to extract prerequisites
+      const noteDetail = await this.getNote(noteId, token);
+
+      if (!noteDetail) {
+        return [];
+      }
+
+      console.log(`noteDetail: ${noteDetail.prerequisites}`);
+
+      // Extract preconditions from noteDetail.prerequisites (now JSON structured)
+      let preconditions: SapNotePrecondition[] = [];
+
+      if (noteDetail.prerequisites && Array.isArray(noteDetail.prerequisites)) {
+        logger.info(`📋 Extracting preconditions from noteDetail.prerequisites (${noteDetail.prerequisites.length} items)`);
+        
+        // Map from JSON structure to SapNotePrecondition format
+        preconditions = noteDetail.prerequisites.map((prereq: any) => ({
+          noteId: prereq.Number?.trim() || '',
+          title: prereq.Title || '',
+          component: prereq.SoftwareComponent || 'N/A',
+          validFrom: prereq.ValidFrom || 'N/A',
+          validTo: prereq.ValidTo || 'N/A'
+        })).filter(prereq => prereq.noteId);
+      }
+
+      // Apply filters if provided
+      if (softwareComponent || version) {
+        preconditions = preconditions.filter(prereq => {
+          let matches = true;
+
+          if (softwareComponent) {
+            matches = matches && prereq.component.toLowerCase().includes(softwareComponent.toLowerCase());
+          }
+
+          if (version) {
+            // Check if version is within the valid range
+            const versionNum = parseInt(version);
+            const validFromNum = parseInt(prereq.validFrom);
+            const validToNum = parseInt(prereq.validTo);
+
+            if (!isNaN(versionNum) && !isNaN(validFromNum) && !isNaN(validToNum)) {
+              matches = matches && (versionNum >= validFromNum && versionNum <= validToNum);
+            } else if (!isNaN(versionNum) && !isNaN(validFromNum) && prereq.validTo === prereq.validFrom) {
+              // Single version match
+              matches = matches && (versionNum === validFromNum);
+            }
+          }
+
+          return matches;
+        });
+      }
+
+      logger.info(`✅ Found ${preconditions.length} prerequisites for note ${noteId}`);
+      return preconditions;
+
+    } catch (error) {
+      logger.error(`❌ Failed to get prerequisites for SAP Note ${noteId}:`, error);
+      throw new Error(`Failed to get prerequisites: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
    * Get a specific SAP Note by ID
    */
   async getNote(noteId: string, token: string): Promise<SapNoteDetail | null> {
@@ -97,7 +173,7 @@ export class SapNotesApiClient {
         logger.info(`🎭 Trying Playwright approach for note ${noteId}`);
         const note = await this.getNoteWithPlaywright(noteId, token);
         if (note) {
-          logger.info(`✅ Retrieved SAP Note ${noteId} via Playwright`);
+          console.log(`✅ Retrieved SAP Note ${noteId} via Playwright`);
           return note;
         }
       } catch (error) {
@@ -110,6 +186,7 @@ export class SapNotesApiClient {
         const rawResponse = await this.makeRawRequest(`/Detail?q=${noteId}&t=E&isVTEnabled=false`, token);
         if (rawResponse.ok) {
           const note = await this.parseRawNoteDetail(rawResponse, noteId);
+          console.log(`note rawResponse:`, JSON.stringify(rawResponse, null, 2));
           if (note) {
             logger.info(`✅ Retrieved SAP Note ${noteId} via raw HTTP API`);
             return note;
@@ -150,6 +227,7 @@ export class SapNotesApiClient {
       throw new Error(`Failed to get SAP Note ${noteId}: ${errorMessage}`);
     }
   }
+
 
   /**
    * Health check for the SAP Notes API
@@ -343,16 +421,20 @@ export class SapNotesApiClient {
    * Map OData result to our SapNoteDetail format
    */
   private mapToSapNoteDetail(item: any, noteId: string): SapNoteDetail {
+    const content = item.Content || item.content || item.Text || item.summary || 'Content not available';
+
     return {
       id: item.SapNote || item.Id || item.id || noteId,
       title: item.Title || item.title || 'Unknown Title',
       summary: item.Summary || item.summary || item.Description || 'No summary available',
-      content: item.Content || item.content || item.Text || item.summary || 'Content not available',
+      content,
       language: item.Language || item.language || 'EN',
       releaseDate: item.ReleaseDate || item.releaseDate || item.CreationDate || 'Unknown',
       component: item.Component || item.component,
       priority: item.Priority || item.priority,
       category: item.Category || item.category,
+      attachments: this.extractAttachments(item.Attachments),
+      prerequisites: this.extractPrerequisites(content),
       url: `https://launchpad.support.sap.com/#/notes/${noteId}`
     };
   }
@@ -391,14 +473,19 @@ export class SapNotesApiClient {
     // Extract title if available
     const titleMatch = html.match(/<title>(.*?)<\/title>/i);
     const title = titleMatch ? titleMatch[1].replace(/SAP\s*-?\s*/i, '').trim() : `SAP Note ${noteId}`;
-    
+
+    // Try to extract some content from HTML
+    const content = html.includes('<body') ? 'Please visit the URL for complete note content' : html.substring(0, 1000);
+
     return {
       id: noteId,
       title,
       summary: 'SAP Note details available at the provided URL',
-      content: 'Please visit the URL for complete note content',
+      content,
       language: 'EN',
       releaseDate: 'Unknown',
+      attachments: this.extractAttachments(null), // No attachments in HTML fallback
+      prerequisites: this.extractPrerequisites(content),
       url: `https://launchpad.support.sap.com/#/notes/${noteId}`
     };
   }
@@ -525,16 +612,20 @@ export class SapNotesApiClient {
       
       // Check if we have a valid note response
       if (jsonData && (jsonData.SapNote || jsonData.id || jsonData.noteId)) {
+        const content = jsonData.Content || jsonData.content || jsonData.Text || jsonData.LongText || jsonData.Html || 'Note content available at URL';
+
         return {
           id: jsonData.SapNote || jsonData.id || jsonData.noteId || noteId,
           title: jsonData.Title || jsonData.title || jsonData.ShortText || `SAP Note ${noteId}`,
           summary: jsonData.Summary || jsonData.summary || jsonData.Abstract || jsonData.abstract || 'SAP Note details',
-          content: jsonData.Content || jsonData.content || jsonData.Text || jsonData.LongText || jsonData.Html || 'Note content available at URL',
+          content,
           language: jsonData.Language || jsonData.language || 'EN',
           releaseDate: jsonData.ReleaseDate || jsonData.releaseDate || jsonData.CreationDate || 'Unknown',
           component: jsonData.Component || jsonData.component,
           priority: jsonData.Priority || jsonData.priority,
           category: jsonData.Category || jsonData.category || jsonData.Type,
+          attachments: this.extractAttachments(jsonData.Attachments),
+          prerequisites: this.extractPrerequisites(content),
           url: `https://launchpad.support.sap.com/#/notes/${noteId}`
         };
       }
@@ -548,13 +639,17 @@ export class SapNotesApiClient {
       
       // If we got a response for a valid note ID, create a basic result
       if (noteId && noteId.match(/^\d{6,8}$/)) {
+        const content = `This SAP Note exists but its content requires browser navigation to access.\n\nTo view the complete note content:\n1. Visit: https://launchpad.support.sap.com/#/notes/${noteId}\n2. Or access through: https://me.sap.com with your SAP credentials\n\nThe note was successfully located but content extraction requires additional authentication steps.`;
+
         return {
           id: noteId,
           title: `SAP Note ${noteId}`,
           summary: 'Note found via raw API - full content requires browser access',
-          content: `This SAP Note exists but its content requires browser navigation to access.\n\nTo view the complete note content:\n1. Visit: https://launchpad.support.sap.com/#/notes/${noteId}\n2. Or access through: https://me.sap.com with your SAP credentials\n\nThe note was successfully located but content extraction requires additional authentication steps.`,
+          content,
           language: 'EN',
           releaseDate: 'Unknown',
+          attachments: [], // No attachments available in redirect response
+          prerequisites: this.extractPrerequisites(content),
           url: `https://launchpad.support.sap.com/#/notes/${noteId}`
         };
       }
@@ -647,9 +742,15 @@ export class SapNotesApiClient {
              if (jsonData.Response && jsonData.Response.SAPNote) {
                const sapNote = jsonData.Response.SAPNote;
                const header = sapNote.Header || {};
-               
+
                logger.info(`📄 Extracting SAP Note data from API response`);
-               
+
+               // Extract attachments
+               const attachments = this.extractAttachments(sapNote.Attachments);
+
+               // Extract prerequisites from SAP Note data
+               const prerequisites = this.extractPrerequisites(sapNote);
+
                return {
                  id: header.Number?.value || noteId,
                  title: sapNote.Title?.value || `SAP Note ${noteId}`,
@@ -660,21 +761,27 @@ export class SapNotesApiClient {
                  component: header.SAPComponentKeyText?.value || header.SAPComponentKey?.value,
                  priority: header.Priority?.value,
                  category: header.Category?.value,
+                 attachments,
+                 prerequisites,
                  url: `https://launchpad.support.sap.com/#/notes/${noteId}`
                };
              }
              
              // Fallback to generic JSON parsing for other structures
+             const content = jsonData.Content || jsonData.content || jsonData.Text || jsonData.LongText || jsonData.Html || jsonData.Description || 'Raw note data retrieved successfully';
+
              return {
                id: jsonData.SapNote || jsonData.id || noteId,
                title: jsonData.Title || jsonData.title || jsonData.ShortText || `SAP Note ${noteId}`,
                summary: jsonData.Summary || jsonData.summary || jsonData.Abstract || jsonData.Description || 'Note content extracted via Playwright',
-               content: jsonData.Content || jsonData.content || jsonData.Text || jsonData.LongText || jsonData.Html || jsonData.Description || 'Raw note data retrieved successfully',
+               content,
                language: jsonData.Language || 'EN',
                releaseDate: jsonData.ReleaseDate || jsonData.CreationDate || 'Unknown',
                component: jsonData.Component,
                priority: jsonData.Priority,
                category: jsonData.Category || jsonData.Type,
+               attachments: this.extractAttachments(jsonData.Attachments),
+               prerequisites: this.extractPrerequisites(content),
                url: `https://launchpad.support.sap.com/#/notes/${noteId}`
              };
            }
@@ -697,9 +804,15 @@ export class SapNotesApiClient {
              if (jsonData.Response && jsonData.Response.SAPNote) {
                const sapNote = jsonData.Response.SAPNote;
                const header = sapNote.Header || {};
-               
+
                logger.info(`📄 Extracting SAP Note data from HTML body API response`);
-               
+
+               // Extract attachments
+               const attachments = this.extractAttachments(sapNote.Attachments);
+
+               // Extract prerequisites from SAP Note data
+               const prerequisites = this.extractPrerequisites(sapNote);
+
                return {
                  id: header.Number?.value || noteId,
                  title: sapNote.Title?.value || `SAP Note ${noteId}`,
@@ -710,21 +823,27 @@ export class SapNotesApiClient {
                  component: header.SAPComponentKeyText?.value || header.SAPComponentKey?.value,
                  priority: header.Priority?.value,
                  category: header.Category?.value,
+                 attachments,
+                 prerequisites,
                  url: `https://launchpad.support.sap.com/#/notes/${noteId}`
                };
              }
              
              // Fallback to generic JSON parsing
+             const content = jsonData.Content || jsonData.content || jsonData.Text || jsonData.LongText || jsonData.Html || 'Note content available';
+
              return {
                id: jsonData.SapNote || jsonData.id || noteId,
                title: jsonData.Title || jsonData.title || jsonData.ShortText || `SAP Note ${noteId}`,
                summary: jsonData.Summary || jsonData.summary || jsonData.Abstract || 'Note extracted via Playwright',
-               content: jsonData.Content || jsonData.content || jsonData.Text || jsonData.LongText || jsonData.Html || 'Note content available',
+               content,
                language: jsonData.Language || 'EN',
                releaseDate: jsonData.ReleaseDate || jsonData.CreationDate || 'Unknown',
                component: jsonData.Component,
                priority: jsonData.Priority,
                category: jsonData.Category || jsonData.Type,
+               attachments: this.extractAttachments(jsonData.Attachments),
+               prerequisites: this.extractPrerequisites(content),
                url: `https://launchpad.support.sap.com/#/notes/${noteId}`
              };
            }
@@ -860,6 +979,174 @@ export class SapNotesApiClient {
     
     return cookies;
   }
+
+  /**
+   * Extract attachments from SAP Note response
+   */
+  private extractAttachments(attachmentsData: any): Array<{name: string, url: string, type?: string, size?: string}> {
+    const attachments: Array<{name: string, url: string, type?: string, size?: string}> = [];
+
+    try {
+      if (attachmentsData && attachmentsData.Items && Array.isArray(attachmentsData.Items)) {
+        for (const item of attachmentsData.Items) {
+          const attachment = {
+            name: item.FileName || 'Unknown',
+            url: item.URL || '',
+            type: item.MimeType,
+            size: item.FileSize
+          };
+
+          if (attachment.url) {
+            attachments.push(attachment);
+          }
+        }
+
+        if (attachments.length > 0) {
+          logger.debug(`📎 Found ${attachments.length} attachments`);
+        }
+      }
+    } catch (error) {
+      logger.warn(`⚠️ Failed to extract attachments: ${error}`);
+    }
+
+    return attachments;
+  }
+
+  /**
+   * Extract prerequisites from SAP Note Preconditions section
+   */
+  private extractPrerequisites(sapNoteData: any): any[] {
+
+    // Handle cases where only content string is passed (fallback mode)
+    // if (typeof sapNoteData === 'string') {
+    //   return this.extractPrerequisitesFromContent(sapNoteData);
+    // }
+    const prerequisites = sapNoteData.Preconditions.Items;
+    return prerequisites;
+
+    // try {
+    //   // First, try to extract from Preconditions structure (technical prerequisites by software component)
+    //   if (sapNoteData.Preconditions && sapNoteData.Preconditions.Items && Array.isArray(sapNoteData.Preconditions.Items)) {
+    //     console.log(`sapNoteData.Preconditions.Items: ${JSON.stringify(sapNoteData.Preconditions.Items, null, 2)}`);
+    //     for (const item of sapNoteData.Preconditions.Items) {
+    //       const prerequisite = {
+    //         note: item.Number?.trim(),
+    //         title: item.Title,
+    //         component: item.SoftwareComponent,
+    //         validFrom: item.ValidFrom,
+    //         validTo: item.ValidTo,
+    //         sapComponent: item.Component
+    //       };
+
+    //       if (prerequisite.note) {
+    //         let prereqText = `SAP Note ${prerequisite.note}`;
+    //         if (prerequisite.component) {
+    //           prereqText += ` (${prerequisite.component}`;
+    //           if (prerequisite.validFrom && prerequisite.validTo) {
+    //             prereqText += ` ${prerequisite.validFrom}-${prerequisite.validTo}`;
+    //           }
+    //           prereqText += ')';
+    //         }
+    //         if (prerequisite.title) {
+    //           prereqText += ` - ${prerequisite.title}`;
+    //         }
+    //         prerequisites.push(prereqText);
+    //       }
+    //     }
+    //   }
+
+      // // Fallback: Extract from content text if no Preconditions structure
+      // if (prerequisites.length === 0 && sapNoteData.LongText?.value) {
+      //   const content = sapNoteData.LongText.value;
+      //   const cleanText = content.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+
+      //   // Look for SAP Note references in prerequisites section
+      //   const notePattern = /(?:SAP )?Note\s+(\d{6,8})/gi;
+      //   const matches = cleanText.match(notePattern);
+
+      //   if (matches) {
+      //     const uniquePrereqNotes = [...new Set(matches.map((match: string) => {
+      //       const noteId = match.match(/(\d{6,8})/);
+      //       return noteId ? noteId[1] : null;
+      //     }).filter(Boolean))] as string[];
+
+      //     prerequisites.push(...uniquePrereqNotes.map((noteId: string) => `SAP Note ${noteId}`));
+      //   }
+
+      //   // Look for system prerequisites
+      //   const systemPrerequisites = cleanText.match(/This SAP Note is relevant only for ([^.]+)/gi);
+      //   if (systemPrerequisites) {
+      //     prerequisites.push(...systemPrerequisites.map((match: string) =>
+      //       match.replace(/^This SAP Note is relevant only for /i, 'Required for: ').trim()
+      //     ));
+      //   }
+      // }
+
+    //   if (prerequisites.length > 0) {
+    //     logger.debug(`📋 Found ${prerequisites.length} prerequisites`);
+    //   }
+    // } catch (error) {
+    //   logger.warn(`⚠️ Failed to extract prerequisites: ${error}`);
+    // }
+
+    // // Remove duplicates and return
+    // return [...new Set(prerequisites)];
+  }
+
+
+  /**
+   * Extract prerequisites from text content (fallback method)
+   */
+  private extractPrerequisitesFromContent(content: string): SapNotePrecondition[] {
+    const prerequisites: SapNotePrecondition[] = [];
+
+    try {
+      if (!content) return prerequisites;
+
+      const cleanText = content.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+
+      // Look for SAP Note references in prerequisites section
+      const notePattern = /(?:SAP )?Note\s+(\d{6,8})/gi;
+      const matches = cleanText.match(notePattern);
+
+      if (matches) {
+        const uniquePrereqNotes = [...new Set(matches.map((match: string) => {
+          const noteId = match.match(/(\d{6,8})/);
+          return noteId ? noteId[1] : null;
+        }).filter(Boolean))] as string[];
+
+        prerequisites.push(...uniquePrereqNotes.map((noteId: string) => ({
+          noteId: noteId,
+          title: '',
+          component: 'N/A',
+          validFrom: 'N/A',
+          validTo: 'N/A'
+        })));
+      }
+
+      // Look for system prerequisites
+      const systemPrerequisites = cleanText.match(/This SAP Note is relevant only for ([^.]+)/gi);
+      if (systemPrerequisites) {
+        prerequisites.push(...systemPrerequisites.map((match: string) => ({
+          noteId: 'SYSTEM',
+          title: match.replace(/^This SAP Note is relevant only for /i, '').trim(),
+          component: 'N/A',
+          validFrom: 'N/A',
+          validTo: 'N/A'
+        })));
+      }
+
+      logger.debug(`📋 Found ${prerequisites.length} prerequisites from content`);
+    } catch (error) {
+      logger.warn(`⚠️ Failed to extract prerequisites from content: ${error}`);
+    }
+
+    // Remove duplicates and return
+    return prerequisites.filter((prereq, index, self) => 
+      index === self.findIndex(p => p.noteId === prereq.noteId)
+    );
+  }
+
 
   /**
    * Get cached cookies from the token cache file
